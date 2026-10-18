@@ -1,0 +1,38 @@
+[Unit]
+Description=swift-monitor — system metrics sampler + localhost API (Asahi)
+
+[Service]
+ExecStart=/usr/local/bin/swift-monitor 2 6420
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=swift-monitor
+RuntimeDirectoryMode=0755
+UMask=0077
+
+# tracefs ownership requires root, not an unrestricted capability set.
+User=root
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+# Only the instances subtree is writable; global trace controls stay read-only.
+ReadWritePaths=-/sys/kernel/tracing/instances
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=~@mount @reboot @swap @raw-io
+# Preserve the host network and /proc for system-wide metrics.
+RestrictAddressFamilies=AF_INET AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target
