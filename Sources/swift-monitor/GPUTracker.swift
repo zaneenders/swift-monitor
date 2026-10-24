@@ -9,8 +9,10 @@ final class GPUTracker: Sendable {
 
     struct State {
         var jobs: [String: Double] = [:]
+        var completions: [String: Double] = [:]
         var completed: [(start: Double, end: Double)] = []
         var lastSampleTime: Double
+        var previousSampleTime: Double
         var available = false
     }
 
@@ -20,7 +22,7 @@ final class GPUTracker: Sendable {
     init(tracingDir: String, now: Double = monotonicSeconds(), traceFS: TraceInstanceFileSystem = .init()) {
         self.traceFS = traceFS
         self.tracingDir = tracingDir
-        self.state = Mutex(State(lastSampleTime: now))
+        self.state = Mutex(State(lastSampleTime: now, previousSampleTime: now))
     }
 
     /// A dedicated I/O thread; nonblocking reads + bounded poll make cancellation joinable.
@@ -45,6 +47,7 @@ final class GPUTracker: Sendable {
             state.withLock {
                 $0.available = false
                 $0.jobs.removeAll()
+                $0.completions.removeAll()
                 $0.completed.removeAll()
             }
         }
@@ -52,6 +55,7 @@ final class GPUTracker: Sendable {
             try withGPUTrace(tracingDir: tracingDir, fileSystem: traceFS) { fd in
                 state.withLock {
                     $0.lastSampleTime = monotonicSeconds()
+                    $0.previousSampleTime = $0.lastSampleTime
                     $0.available = true
                 }
                 consume(fd: fd)
@@ -94,7 +98,7 @@ final class GPUTracker: Sendable {
 
     func ingest(line: String) {
         if line.contains("LOST"), line.contains("EVENTS") {
-            state.withLock { $0.jobs.removeAll(); $0.completed.removeAll() }
+            state.withLock { $0.jobs.removeAll(); $0.completions.removeAll(); $0.completed.removeAll() }
             return
         }
         guard let colon = line.range(of: ": drm_sched_job_") else { return }
@@ -113,9 +117,19 @@ final class GPUTracker: Sendable {
             // Late trace data cannot revise an already published sampling window.
             let time = max(timestamp, s.lastSampleTime)
             if event == "run" {
-                if s.jobs[job] == nil { s.jobs[job] = time }
-            } else if event == "done", let start = s.jobs.removeValue(forKey: job) {
-                s.completed.append((start, max(start, time)))
+                // trace_clock=mono can go backwards across a timekeeper update.
+                // Keep unmatched completions so merged per-CPU events can still pair.
+                if let end = s.completions.removeValue(forKey: job) {
+                    s.completed.append((time, max(time, end)))
+                } else if timestamp >= s.previousSampleTime, s.jobs[job] == nil {
+                    s.jobs[job] = time
+                }
+            } else if event == "done" {
+                if let start = s.jobs.removeValue(forKey: job) {
+                    s.completed.append((start, max(start, time)))
+                } else if timestamp >= s.previousSampleTime {
+                    s.completions[job] = time
+                }
             }
         }
     }
@@ -136,6 +150,10 @@ final class GPUTracker: Sendable {
             }
             let percent = Int((min(1, max(0, busy / (now - s.lastSampleTime))) * 100).rounded())
             s.completed.removeAll { $0.end <= now }
+            // Retain one previous window for reordered pairs. Older unmatched starts
+            // cannot be distinguished from lost completions, so do not resurrect them.
+            s.completions = s.completions.filter { $0.value >= s.lastSampleTime }
+            s.previousSampleTime = s.lastSampleTime
             s.lastSampleTime = now
             return (percent, s.available)
         }

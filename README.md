@@ -159,6 +159,20 @@ real GPU workloads still require privileged validation. Trace data arriving afte
 a published window is clipped at its boundary; lost-event notifications reset
 tracked jobs rather than leaving false permanent occupancy.
 
+```text
+trace_clock=mono → per-CPU buffers → trace_pipe → GPUTracker
+    done(id) → run(id)          → completed interval, not a stranded job
+    unmatched done(id)          → retained through the next sample
+    unmatched run(id), too old  → ignored after completion history expires
+    tracked run(id) → done(id)  → paired regardless of job duration
+```
+
+`mono` uses `ktime_get_mono_fast_ns`, which can move backwards across a
+[timekeeper update](https://github.com/torvalds/linux/blob/master/kernel/time/timekeeping.c).
+Timestamp-merged delivery therefore need not put `run` before `done`.
+Completion history is bounded by sampling windows; existing running jobs are
+not timed out.
+
 ### Privileged release validation (Asahi host)
 
 ```text

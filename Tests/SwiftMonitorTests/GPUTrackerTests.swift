@@ -36,6 +36,69 @@ private func event(_ time: Double, _ kind: String, _ id: String = "1:1") -> Stri
     #expect(gpu.sample(now: 3).busy == 50)
 }
 
+@Test func gpuCompletionBeforeStartDoesNotLeavePermanentOccupancy() {
+    let gpu = GPUTracker(tracingDir: "/unused", now: 0)
+    // Kernel formats differ: only run has a comma after the fence ID.
+    gpu.ingest(line: "irq-2 [001] d..1. 0.75: drm_sched_job_done: fence=1:1 signaled")
+    gpu.ingest(line: "worker-1 [000] d..1. 0.25: drm_sched_job_run: dev=206400000.gpu, fence=1:1, ring=gpu, job count:0, hw job count:1, client_id:1")
+    #expect(gpu.sample(now: 1).busy == 50)
+    #expect(gpu.sample(now: 2).busy == 0)
+}
+
+@Test func gpuCompletionBeforeStartCanCrossASampleBoundary() {
+    let gpu = GPUTracker(tracingDir: "/unused", now: 0)
+    gpu.ingest(line: event(0.75, "done"))
+    #expect(gpu.sample(now: 1).busy == 0)
+    gpu.ingest(line: event(0.25, "run"))
+    #expect(gpu.sample(now: 2).busy == 0)
+    #expect(gpu.sample(now: 3).busy == 0)
+}
+
+@Test func gpuExpiredCompletionCannotResurrectAnOldStart() {
+    let gpu = GPUTracker(tracingDir: "/unused", now: 0)
+    gpu.ingest(line: event(0.75, "done"))
+    #expect(gpu.sample(now: 1).busy == 0)
+    #expect(gpu.sample(now: 2).busy == 0)
+    gpu.ingest(line: event(0.25, "run"))
+    #expect(gpu.sample(now: 3).busy == 0)
+    #expect(gpu.sample(now: 4).busy == 0)
+}
+
+@Test func gpuReversedTimestampsStillPair() {
+    let gpu = GPUTracker(tracingDir: "/unused", now: 0)
+    gpu.ingest(line: event(0.249999, "done"))
+    gpu.ingest(line: event(0.25, "run"))
+    #expect(gpu.sample(now: 1).busy == 0)
+    #expect(gpu.sample(now: 2).busy == 0)
+}
+
+@Test func gpuUnmatchedCompletionsExpireAndResetOnLoss() {
+    let gpu = GPUTracker(tracingDir: "/unused", now: 0)
+    gpu.ingest(line: event(0.5, "done"))
+    #expect(gpu.sample(now: 1).busy == 0)
+    #expect(gpu.state.withLock { $0.completions.count } == 1)
+    #expect(gpu.sample(now: 2).busy == 0)
+    #expect(gpu.state.withLock { $0.completions.isEmpty })
+    gpu.ingest(line: event(0.5, "done"))
+    #expect(gpu.state.withLock { $0.completions.isEmpty })
+    gpu.ingest(line: event(2.5, "done"))
+    gpu.ingest(line: "CPU:0 [LOST 10 EVENTS]")
+    #expect(gpu.state.withLock { $0.completions.isEmpty })
+    gpu.ingest(line: event(2.75, "run"))
+    #expect(gpu.sample(now: 3).busy == 25)
+    #expect(gpu.sample(now: 4).busy == 100)
+}
+
+@Test func gpuLongRunningJobsAreNotExpiredWithCompletionHistory() {
+    let gpu = GPUTracker(tracingDir: "/unused", now: 0)
+    gpu.ingest(line: event(0.5, "run"))
+    #expect(gpu.sample(now: 1).busy == 50)
+    for time in 2...10 { #expect(gpu.sample(now: Double(time)).busy == 100) }
+    // Even a delayed completion must retire an already tracked job.
+    gpu.ingest(line: event(7.5, "done"))
+    #expect(gpu.sample(now: 11).busy == 0)
+}
+
 @Test func gpuLateAndMalformedEventsCannotRevisePublishedWindow() {
     let gpu = GPUTracker(tracingDir: "/unused", now: 0)
     #expect(gpu.sample(now: 2).busy == 0)
